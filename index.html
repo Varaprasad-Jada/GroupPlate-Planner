@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GroupPlate Planner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        /* Hide scrollbars for a clean in-app look */
+        .custom-scroll::-webkit-scrollbar { display: none; }
+        .custom-scroll { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen p-4">
+
+    <div id="loading" class="fixed inset-0 bg-gray-900 flex flex-col items-center justify-center z-50 transition-opacity duration-300">
+        <svg class="animate-spin h-8 w-8 text-yellow-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <p class="mt-4 text-gray-400">Authenticating and loading planner data...</p>
+    </div>
+
+    <div id="app-container" class="hidden max-w-lg mx-auto pb-20">
+        <header class="text-center mb-6">
+            <h1 class="text-2xl font-bold text-yellow-500">GroupPlate Planner</h1>
+            <p id="group-name-display" class="text-sm text-gray-400 mt-1">Group Meal Plan</p>
+        </header>
+
+        <div class="flex mb-6 bg-gray-800 rounded-lg p-1 shadow-md">
+            <button id="tab-planner" class="flex-1 py-2 text-sm font-medium rounded-md transition-colors bg-yellow-600 text-gray-900">🍽️ Weekly Plan</button>
+            <button id="tab-shopping" class="flex-1 py-2 text-sm font-medium rounded-md transition-colors text-gray-300 hover:text-yellow-500">🛒 Shopping List</button>
+        </div>
+
+        <div id="view-planner">
+            <div id="weekly-calendar" class="space-y-3 custom-scroll max-h-[70vh] overflow-y-auto">
+                </div>
+        </div>
+
+        <div id="view-shopping" class="hidden">
+            <div id="shopping-list-container" class="space-y-3 custom-scroll max-h-[70vh] overflow-y-auto">
+                </div>
+        </div>
+
+        <p class="text-xs text-center text-gray-600 mt-4">User: <span id="user-display">N/A</span> | Group ID: <span id="chat-id-display">N/A</span></p>
+
+    </div>
+
+    <div id="add-meal-modal" class="fixed inset-0 bg-gray-900 bg-opacity-95 hidden flex items-center justify-center p-4 z-50">
+        <div class="bg-gray-800 p-6 rounded-xl shadow-2xl w-full max-w-sm">
+            <h2 class="text-xl font-bold text-yellow-500 mb-4" id="modal-title">Plan Meal</h2>
+            <input type="hidden" id="modal-day">
+
+            <label for="meal-title" class="block text-sm font-medium text-gray-400 mb-1">Meal Title</label>
+            <input type="text" id="meal-title" placeholder="e.g., Chicken Curry" class="w-full p-2 mb-4 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-yellow-500 focus:border-yellow-500">
+
+            <label for="recipe-url" class="block text-sm font-medium text-gray-400 mb-1">Recipe Link (Optional)</label>
+            <input type="url" id="recipe-url" placeholder="https://myrecipe.com/curry" class="w-full p-2 mb-6 bg-gray-700 border border-gray-600 rounded-lg text-white focus:ring-yellow-500 focus:border-yellow-500">
+
+            <div class="flex justify-between">
+                <button onclick="hideModal('add-meal-modal')" class="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white rounded-lg transition-colors">Cancel</button>
+                <button id="save-meal-btn" class="px-4 py-2 text-sm font-bold bg-yellow-600 text-gray-900 rounded-lg hover:bg-yellow-500 transition-colors">Save & Update List</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, collection, addDoc, updateDoc, deleteDoc, getDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment (or set to mock for local testing)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- Application State ---
+        window.db;
+        window.auth;
+        window.currentUserId = 'unknown';
+        window.currentUserName = 'Guest';
+        window.chatId = null; // Group/Collaboration Key
+        window.weeklyPlanData = {};
+        window.shoppingListData = [];
+
+        // --- Utility Functions (Core Logic) ---
+
+        function getGroupDocRef() {
+            if (!window.db || !window.chatId) return null;
+            // Public path for collaborative data
+            return doc(window.db, `/artifacts/${appId}/public/data/groups/${window.chatId}`);
+        }
+
+        function getShoppingListCollectionRef() {
+            if (!window.db || !window.chatId) return null;
+            return collection(getGroupDocRef(), 'shoppingList');
+        }
+
+        // Simulates ingredient parsing from a recipe link/title
+        function simulateIngredientParsing(recipeTitle) {
+            recipeTitle = recipeTitle.toLowerCase();
+            if (recipeTitle.includes("pasta") || recipeTitle.includes("spaghetti")) {
+                return [
+                    { name: "Spaghetti Pasta", quantity: "1 lb" },
+                    { name: "Tomato Sauce", quantity: "1 jar" },
+                    { name: "Ground Beef", quantity: "1 lb" },
+                    { name: "Onion", quantity: "1 unit" }
+                ];
+            } else if (recipeTitle.includes("curry")) {
+                return [
+                    { name: "Chicken Breast", quantity: "2 lbs" },
+                    { name: "Curry Paste", quantity: "1 container" },
+                    { name: "Coconut Milk", quantity: "2 cans" },
+                    { name: "Rice", quantity: "2 cups" }
+                ];
+            } else if (recipeTitle.includes("salad")) {
+                 return [
+                    { name: "Lettuce", quantity: "1 head" },
+                    { name: "Tomatoes", quantity: "2 large" },
+                    { name: "Dressing", quantity: "1 bottle" }
+                ];
+            } else {
+                return [{ name: recipeTitle + " Main Ingredient", quantity: "1" }];
+            }
+        }
+
+        // --- View & Interaction Helpers ---
+
+        function showView(viewId) {
+            document.getElementById('view-planner').classList.add('hidden');
+            document.getElementById('view-shopping').classList.add('hidden');
+            
+            // Manage Tab Styles
+            document.querySelectorAll('[id^="tab-"]').forEach(btn => {
+                btn.classList.remove('bg-yellow-600', 'text-gray-900');
+                btn.classList.add('text-gray-300', 'hover:text-yellow-500');
+            });
+
+            document.getElementById(viewId).classList.remove('hidden');
+            document.getElementById(`tab-${viewId.replace('view-', '')}`).classList.add('bg-yellow-600', 'text-gray-900');
+            document.getElementById(`tab-${viewId.replace('view-', '')}`).classList.remove('text-gray-300', 'hover:text-yellow-500');
+
+            // Manage Telegram MainButton
+            if (window.Telegram.WebApp.MainButton.isVisible) {
+                if (viewId === 'view-planner') {
+                    window.Telegram.WebApp.MainButton.setText("View Shopping List 🛒");
+                    window.Telegram.WebApp.MainButton.onClick(() => showView('view-shopping'));
+                } else {
+                    window.Telegram.WebApp.MainButton.setText("Back to Planner 🍽️");
+                    window.Telegram.WebApp.MainButton.onClick(() => showView('view-planner'));
+                }
+            }
+        }
+
+        function showModal(modalId, day = null) {
+            const modal = document.getElementById(modalId);
+            if (modalId === 'add-meal-modal') {
+                document.getElementById('modal-day').value = day;
+                document.getElementById('modal-title').textContent = `Plan Meal for ${day}`;
+                document.getElementById('meal-title').value = window.weeklyPlanData[day]?.title || '';
+                document.getElementById('recipe-url').value = window.weeklyPlanData[day]?.url || '';
+            }
+            modal.classList.remove('hidden');
+        }
+
+        function hideModal(modalId) {
+            document.getElementById(modalId).classList.add('hidden');
+        }
+
+        // --- Data Renderers ---
+
+        function renderWeeklyPlan() {
+            const calendarEl = document.getElementById('weekly-calendar');
+            calendarEl.innerHTML = '';
+            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+            days.forEach(day => {
+                const meal = window.weeklyPlanData[day];
+                const card = document.createElement('div');
+                card.className = 'bg-gray-800 p-4 rounded-xl shadow-lg border-t-4 border-yellow-600 cursor-pointer transition-shadow hover:shadow-yellow-500/50';
+                card.onclick = () => showModal('add-meal-modal', day);
+
+                let content = `
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-lg font-semibold text-yellow-500">${day}</h3>
+                        ${meal ? `<button onclick="event.stopPropagation(); deleteMeal('${day}')" class="text-red-400 hover:text-red-500 text-sm">Remove</button>` : ''}
+                    </div>
+                `;
+
+                if (meal) {
+                    content += `
+                        <p class="text-xl font-bold">${meal.title}</p>
+                        ${meal.url ? `<a href="${meal.url}" target="_blank" class="text-sm text-yellow-400 hover:text-yellow-300 truncate block">${meal.url}</a>` : '<p class="text-sm text-gray-500">No recipe link provided.</p>'}
+                    `;
+                } else {
+                    content += '<p class="text-gray-400 italic">Tap to plan meal...</p>';
+                }
+
+                card.innerHTML = content;
+                calendarEl.appendChild(card);
+            });
+        }
+
+        function renderShoppingList() {
+            const listEl = document.getElementById('shopping-list-container');
+            listEl.innerHTML = '';
+
+            if (window.shoppingListData.length === 0) {
+                 listEl.innerHTML = '<p class="text-center text-gray-500 italic p-8">The shopping list is empty. Plan meals to generate ingredients!</p>';
+                 return;
+            }
+
+            // Sort: Unpurchased first, then Purchased
+            const sortedList = [...window.shoppingListData].sort((a, b) => (a.isPurchased === b.isPurchased) ? 0 : a.isPurchased ? 1 : -1);
+
+            sortedList.forEach(item => {
+                const isChecked = item.isPurchased;
+                const assigned = item.assignedToName || 'Unassigned';
+
+                const listItem = document.createElement('div');
+                listItem.className = `flex items-center justify-between p-3 rounded-lg shadow-md transition-all ${isChecked ? 'bg-gray-700 opacity-60' : 'bg-gray-800'}`;
+                listItem.innerHTML = `
+                    <div class="flex items-center flex-grow">
+                        <input type="checkbox" id="item-${item.id}" ${isChecked ? 'checked' : ''} class="form-checkbox h-5 w-5 text-yellow-600 bg-gray-600 border-gray-500 rounded focus:ring-yellow-500"
+                            onchange="togglePurchased('${item.id}', this.checked)">
+                        <label for="item-${item.id}" class="ml-3 text-sm font-medium ${isChecked ? 'line-through text-gray-400' : 'text-white'}">
+                            <span class="font-bold">${item.quantity}</span> of ${item.name}
+                        </label>
+                    </div>
+
+                    <div class="flex items-center space-x-2 ml-4">
+                        <button class="px-3 py-1 text-xs rounded-full transition-colors ${item.assignedTo === window.currentUserId ? 'bg-yellow-600 text-gray-900 font-semibold' : 'bg-gray-700 text-gray-300 hover:bg-yellow-700'}"
+                            onclick="assignItem('${item.id}', '${item.assignedTo === window.currentUserId ? 'unassign' : 'assign'}')">
+                            ${item.assignedTo === window.currentUserId ? 'Mine!' : assigned}
+                        </button>
+                    </div>
+                `;
+                listEl.appendChild(listItem);
+            });
+        }
+
+        // --- Firestore Listeners & Actions ---
+
+        function initRealtimeListeners() {
+            if (!window.chatId) return;
+
+            // 1. Weekly Plan Listener
+            onSnapshot(getGroupDocRef(), (docSnapshot) => {
+                if (docSnapshot.exists()) {
+                    window.weeklyPlanData = docSnapshot.data().weeklyPlan || {};
+                    document.getElementById('group-name-display').textContent = docSnapshot.data().name || `Plan for Chat: ${window.chatId}`;
+                } else {
+                    // Create default document if it doesn't exist
+                    setDoc(getGroupDocRef(), { name: 'Group Meal Plan', weeklyPlan: {} }, { merge: true }).catch(e => console.error("Error creating default plan:", e));
+                    window.weeklyPlanData = {};
+                }
+                renderWeeklyPlan();
+            }, (error) => { console.error("Error listening to weekly plan:", error); });
+
+            // 2. Shopping List Listener
+            onSnapshot(getShoppingListCollectionRef(), (snapshot) => {
+                window.shoppingListData = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data()
+                }));
+                renderShoppingList();
+            }, (error) => { console.error("Error listening to shopping list:", error); });
+        }
+
+        async function saveMeal() {
+            const day = document.getElementById('modal-day').value;
+            const title = document.getElementById('meal-title').value.trim();
+            const url = document.getElementById('recipe-url').value.trim();
+
+            if (!title) { window.Telegram.WebApp.showAlert('Meal title is required!'); return; }
+
+            hideModal('add-meal-modal');
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
+
+            try {
+                // 1. Update the Weekly Plan Document
+                const planUpdate = { [`weeklyPlan.${day}`]: { title, url } };
+                await updateDoc(getGroupDocRef(), planUpdate);
+
+                // 2. Automated Ingredient Consolidation
+                await consolidateIngredients();
+
+            } catch (e) {
+                console.error("Error saving meal:", e);
+                window.Telegram.WebApp.showAlert(`Error saving meal: ${e.message}`);
+            }
+        }
+
+        async function deleteMeal(day) {
+            window.Telegram.WebApp.showConfirm(`Remove meal for ${day}?`, async (isConfirmed) => {
+                if (isConfirmed) {
+                    try {
+                        const planRef = getGroupDocRef();
+                        const docSnap = await getDoc(planRef);
+                        if (docSnap.exists()) {
+                            const currentPlan = docSnap.data().weeklyPlan;
+                            delete currentPlan[day]; // Removes the day from the map
+                            await setDoc(planRef, { weeklyPlan: currentPlan }, { merge: true });
+
+                            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+                            await consolidateIngredients(); // Recalculate list
+                        }
+                    } catch (e) {
+                        console.error("Error deleting meal:", e);
+                        window.Telegram.WebApp.showAlert(`Error deleting meal: ${e.message}`);
+                    }
+                }
+            });
+        }
+
+        async function consolidateIngredients() {
+            const collectionRef = getShoppingListCollectionRef();
+            
+            // 1. Clear the entire list first (simplifies synchronization logic)
+            const snapshot = await getDocs(collectionRef);
+            const deletePromises = [];
+            snapshot.docs.forEach(doc => deletePromises.push(deleteDoc(doc.ref)));
+            await Promise.all(deletePromises);
+
+            // 2. Generate new list from all planned meals
+            const newIngredients = [];
+            for (const day in window.weeklyPlanData) {
+                const meal = window.weeklyPlanData[day];
+                const ingredients = simulateIngredientParsing(meal.title);
+                newIngredients.push(...ingredients);
+            }
+
+            // 3. Add new ingredients to the shopping list collection
+            const addPromises = [];
+            newIngredients.forEach(item => {
+                addPromises.push(addDoc(collectionRef, {
+                    name: item.name,
+                    quantity: item.quantity,
+                    isPurchased: false,
+                    assignedTo: null,
+                    assignedToName: null,
+                }));
+            });
+            await Promise.all(addPromises);
+        }
+
+        async function togglePurchased(itemId, isChecked) {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
+            try {
+                const itemRef = doc(getShoppingListCollectionRef(), itemId);
+                await updateDoc(itemRef, { isPurchased: isChecked });
+            } catch (e) { console.error("Error toggling status:", e); }
+        }
+
+        async function assignItem(itemId, action) {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
+            try {
+                const itemRef = doc(getShoppingListCollectionRef(), itemId);
+                const isAssign = action === 'assign';
+
+                const updateData = {
+                    assignedTo: isAssign ? window.currentUserId : null,
+                    assignedToName: isAssign ? window.currentUserName : null
+                };
+
+                await updateDoc(itemRef, updateData);
+            } catch (e) { console.error("Error assigning item:", e); }
+        }
+
+        // --- TMA & Firebase Initialization ---
+
+        function getTelegramContext() {
+            if (typeof window.Telegram.WebApp === 'undefined' || !window.Telegram.WebApp.initDataUnsafe) {
+                // Mock data for debugging outside Telegram
+                window.chatId = 'MOCK_GROUP_12345';
+                window.currentUserId = 'MOCK_USER_999';
+                window.currentUserName = 'Mock User';
+            } else {
+                window.Telegram.WebApp.ready();
+                const initData = window.Telegram.WebApp.initDataUnsafe;
+                
+                // Set the unique group/collaboration key
+                const chatIdRaw = initData.chat?.id || initData.receiver?.id || 'default_chat';
+                window.chatId = `${chatIdRaw}_${initData.chat?.type || 'private'}`;
+                
+                if (initData.user) {
+                    window.currentUserId = initData.user.id.toString();
+                    window.currentUserName = initData.user.first_name + (initData.user.last_name ? ' ' + initData.user.last_name : '');
+                } else {
+                     window.currentUserId = 'anon_' + (window.auth.currentUser?.uid || 'noauth');
+                     window.currentUserName = 'Anonymous User';
+                }
+            }
+
+            document.getElementById('user-display').textContent = window.currentUserName;
+            document.getElementById('chat-id-display').textContent = window.chatId;
+
+            // Initialize Telegram Main Button for view switching
+            window.Telegram.WebApp.MainButton.setText("View Shopping List 🛒");
+            window.Telegram.WebApp.MainButton.show();
+            window.Telegram.WebApp.MainButton.onClick(() => showView('view-shopping'));
+        }
+
+        async function initFirebase() {
+            if (!firebaseConfig) {
+                document.getElementById('loading').innerHTML = '<p class="text-red-500">FATAL ERROR: Firebase config is missing. App cannot run.</p>';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
+
+                // Authenticate user
+                if (initialAuthToken) {
+                    await signInWithCustomToken(window.auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(window.auth); // Fallback for testing/unauthed users
+                }
+
+                onAuthStateChanged(window.auth, (user) => {
+                    if (user) {
+                        getTelegramContext(); // Get group/user details
+                        initRealtimeListeners(); // Start data sync
+                        
+                        // Hide loading screen
+                        document.getElementById('loading').classList.add('opacity-0', 'pointer-events-none');
+                        document.getElementById('app-container').classList.remove('hidden');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase failed:", error);
+                window.Telegram.WebApp.showAlert(`Initialization Error: ${error.message}. Check the console.`);
+            }
+        }
+
+        // --- Global Exports & Event Listeners ---
+        window.saveMeal = saveMeal;
+        window.hideModal = hideModal;
+        window.showModal = showModal;
+        window.showView = showView;
+        window.togglePurchased = togglePurchased;
+        window.assignItem = assignItem;
+        window.deleteMeal = deleteMeal;
+
+        window.onload = initFirebase; // Start the app on load
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('tab-planner').addEventListener('click', () => showView('view-planner'));
+            document.getElementById('tab-shopping').addEventListener('click', () => showView('view-shopping'));
+            document.getElementById('save-meal-btn').addEventListener('click', saveMeal);
+        });
+
+    </script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</body>
+</html>
+```eof
+
+***
+
+## Deployment Notes
+
+To make this code functional as a Telegram Mini App, you need to:
+
+1.  **Host the Code:** Upload this entire `index.html` file to a public web server (e.g., Firebase Hosting, GitHub Pages, or any simple web host).
+2.  **Get Firebase Credentials:** Create a project in Google Firebase and set up **Firestore** and **Anonymous Authentication**. You'll need the following three global variables to be defined by the Canvas environment for the code to run correctly in production:
+    * `__app_id`
+    * `__firebase_config` (the JSON configuration for your web app)
+    * `__initial_auth_token` (used to securely authenticate the Telegram user)
+3.  **Create the Bot:** Register a new bot with **BotFather** on Telegram.
+4.  **Set Up the Mini App:** Use **BotFather** to set a **Menu Button** URL, pointing it to your hosted `index.html`. When users click this button, the Mini App will launch!
